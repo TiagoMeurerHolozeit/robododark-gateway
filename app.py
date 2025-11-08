@@ -12,12 +12,11 @@ app = Flask(__name__)
 DATA_FILE = os.getenv("REGISTRY_FILE", "registry.json")
 GATEWAY_BASE = os.getenv("GATEWAY_BASE")  # ex: https://robododark-gateway.onrender.com
 ALLOWED_UPDATES = json.dumps(["message", "edited_message", "callback_query"])
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")  # opcional, pra /v1/list
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 lock = threading.Lock()
 
 
-# ---------------- helpers ----------------
 def load_registry():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -34,7 +33,7 @@ def save_registry(r):
             json.dump(r, f, indent=2, ensure_ascii=False)
 
 
-def make_secret(bot_username):
+def make_secret(bot_username: str) -> str:
     s = f"{bot_username}-{time.time()}-{os.urandom(8).hex()}"
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -49,8 +48,7 @@ def telegram_api_post(bot_token, path="setWebhook", params=None, timeout=15):
     return requests.post(url, params=params, timeout=timeout)
 
 
-# ---------------- endpoints ----------------
-@app.route("/", methods=["GET"])
+@app.get("/")
 def root():
     return jsonify(
         {
@@ -61,20 +59,18 @@ def root():
     )
 
 
-@app.route("/v1/register", methods=["POST"])
+@app.post("/v1/register")
 def register():
     """
     Body JSON:
       {
         "bot_token": "...",
-        "forward_url": "http://127.0.0.1:5678/webhook/robododark_telegram"
+        "forward_url": "https://seu-tunel/webhook/robododark_telegram"
       }
-    Returns:
-      { ok: true, bot_username, secret, webhook }
     """
     data = request.get_json(force=True, silent=True) or {}
-    bot_token = data.get("bot_token")
-    forward_url = data.get("forward_url")
+    bot_token = data.get("bot_token", "").strip()
+    forward_url = data.get("forward_url", "").strip()
 
     if not bot_token or not forward_url:
         return (
@@ -82,7 +78,7 @@ def register():
             400,
         )
 
-    # 1) valida token no Telegram
+    # 1. valida o token no Telegram
     try:
         r = telegram_api_get(bot_token, "getMe", timeout=10)
     except Exception as e:
@@ -117,7 +113,7 @@ def register():
             400,
         )
 
-    # 2) gera segredo e salva
+    # 2. salva no registry primeiro (ESSENCIAL)
     secret = make_secret(username)
     registry = load_registry()
     registry[username] = {
@@ -128,7 +124,7 @@ def register():
     }
     save_registry(registry)
 
-    # 3) monta URL pública deste gateway
+    # 3. monta a URL do webhook que o Telegram vai chamar (sempre o gateway)
     if GATEWAY_BASE:
         gateway_base = GATEWAY_BASE.rstrip("/")
     else:
@@ -136,55 +132,47 @@ def register():
 
     webhook_url = f"{gateway_base}/telegram/{username}"
 
-    # 4) registra o webhook no Telegram (AQUI estava o 400)
-    #    o Telegram quer secret_token como param, não no JSON
+    # 4. tenta registrar no Telegram,
+    #    mas se der erro, não vamos mais devolver 400 pra quem chamou.
     params = {
         "url": webhook_url,
         "allowed_updates": ALLOWED_UPDATES,
         "secret_token": secret,
     }
 
+    telegram_ok = True
+    telegram_error_text = None
     try:
         set_r = telegram_api_post(bot_token, "setWebhook", params=params, timeout=15)
+        if not set_r.ok:
+            telegram_ok = False
+            telegram_error_text = set_r.text
     except Exception as e:
-        return (
-            jsonify({"ok": False, "error": "setWebhook_failed", "detail": str(e)}),
-            502,
-        )
+        telegram_ok = False
+        telegram_error_text = str(e)
 
-    if not set_r.ok:
-        # devolve o erro do Telegram pra facilitar debug
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "telegram_setWebhook_failed",
-                    "telegram": set_r.text,
-                }
-            ),
-            400,
-        )
+    # 5. devolve sempre 200, porque o registro local deu certo
+    resp = {
+        "ok": True,
+        "bot_username": username,
+        "secret": secret,
+        "webhook": webhook_url,
+        "forward_url": forward_url,
+        "telegram_set_webhook": telegram_ok,
+    }
+    if not telegram_ok:
+        resp["telegram_error"] = telegram_error_text
 
-    # 5) resposta final
-    return jsonify(
-        {
-            "ok": True,
-            "bot_username": username,
-            "secret": secret,
-            "webhook": webhook_url,
-            "forward_url": forward_url,
-        }
-    )
+    return jsonify(resp), 200
 
 
-@app.route("/telegram/<bot_username>", methods=["POST"])
+@app.post("/telegram/<bot_username>")
 def telegram_webhook(bot_username):
     registry = load_registry()
     entry = registry.get(bot_username)
     if not entry:
         return ("ignored", 404)
 
-    # valida secret do Telegram
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if header_secret and header_secret != entry.get("secret"):
         app.logger.warning("secret mismatch for %s", bot_username)
@@ -202,9 +190,7 @@ def telegram_webhook(bot_username):
             "X-RoboDoDark-Secret": entry.get("secret"),
             "X-Forwarded-For": request.remote_addr or "",
         }
-        forward_r = requests.post(
-            callback, json=payload, headers=headers, timeout=15
-        )
+        requests.post(callback, json=payload, headers=headers, timeout=15)
     except Exception as e:
         app.logger.exception("forward failed")
         return (
@@ -215,7 +201,7 @@ def telegram_webhook(bot_username):
     return ("OK", 200)
 
 
-@app.route("/v1/list", methods=["GET"])
+@app.get("/v1/list")
 def list_registrations():
     token = request.args.get("admin_token") or request.headers.get("X-Admin-Token")
     if ADMIN_TOKEN and token != ADMIN_TOKEN:
@@ -223,7 +209,7 @@ def list_registrations():
     return jsonify(load_registry())
 
 
-@app.route("/healthz", methods=["GET"])
+@app.get("/healthz")
 def healthz():
     return jsonify({"ok": True, "time": int(time.time())})
 
