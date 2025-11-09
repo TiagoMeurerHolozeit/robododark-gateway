@@ -158,24 +158,28 @@ def telegram_webhook(bot_username):
     if not entry:
         fallback_url = os.getenv("FORWARD_FALLBACK_URL")
         if not fallback_url:
+            app.logger.warning(f"[Webhook] Nenhum registro encontrado para {bot_username}")
             return ("ignored", 404)
-        # monta um entry fake só pra este request
         entry = {
             "forward_url": fallback_url,
-            "secret": os.getenv("FALLBACK_SECRET", ""),  # opcional
+            "secret": os.getenv("FALLBACK_SECRET", ""),
         }
 
-    # valida o secret do Telegram, se ele mandou
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if header_secret and header_secret != entry.get("secret", ""):
-        app.logger.warning("secret mismatch for %s", bot_username)
+        app.logger.warning(f"[Webhook] Secret mismatch para {bot_username}")
         return ("unauthorized", 401)
 
     callback = entry.get("forward_url")
     if not callback:
+        app.logger.error(f"[Webhook] Nenhum callback definido para {bot_username}")
         return ("no callback", 500)
 
     payload = request.get_json(force=True, silent=True)
+
+    # 🔹 Logs visíveis no Render
+    app.logger.info(f"[Webhook] Mensagem recebida de Telegram → {bot_username}")
+    app.logger.info(f"[Forward] Enviando para {callback}")
 
     try:
         headers = {
@@ -183,9 +187,10 @@ def telegram_webhook(bot_username):
             "X-RoboDoDark-Secret": entry.get("secret", ""),
             "X-Forwarded-For": request.remote_addr or "",
         }
-        requests.post(callback, json=payload, headers=headers, timeout=15)
+        r = requests.post(callback, json=payload, headers=headers, timeout=15)
+        app.logger.info(f"[Forward] OK → {callback} | status={r.status_code}")
     except Exception as e:
-        app.logger.exception("forward failed")
+        app.logger.error(f"[Forward] Falhou → {callback} | erro={str(e)}")
         return (
             jsonify({"ok": False, "error": "forward_failed", "detail": str(e)}),
             502,
@@ -194,14 +199,8 @@ def telegram_webhook(bot_username):
     return ("OK", 200)
 
 
-# ---------- NOVO: endpoint pra testar o forward de dentro do Render ----------
 @app.post("/v1/test-forward")
 def test_forward():
-    """
-    POST /v1/test-forward?bot=OmniSuperBot
-    Tenta reenviar um JSON de teste para o forward_url salvo no registry.
-    Útil pra ver se o Render consegue falar com o teu domínio.
-    """
     bot = request.args.get("bot", "").strip()
     registry = load_registry()
     entry = registry.get(bot)
@@ -219,6 +218,8 @@ def test_forward():
         "time": int(time.time()),
     }
 
+    app.logger.info(f"[TestForward] Testando envio para {forward}")
+
     try:
         r = requests.post(
             forward,
@@ -226,6 +227,7 @@ def test_forward():
             headers={"Content-Type": "application/json", "X-RoboDoDark-Test": "1"},
             timeout=15,
         )
+        app.logger.info(f"[TestForward] Resposta {r.status_code} de {forward}")
         return jsonify(
             {
                 "ok": True,
@@ -235,6 +237,7 @@ def test_forward():
             }
         ), 200
     except Exception as e:
+        app.logger.error(f"[TestForward] Falhou para {forward} → {e}")
         return jsonify(
             {
                 "ok": False,
