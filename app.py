@@ -135,6 +135,8 @@ def register():
         telegram_ok = False
         telegram_error_text = str(e)
 
+    app.logger.info(f"[Register] bot={username} forward_url={forward_url} webhook={webhook_url} tg_ok={telegram_ok}")
+
     resp = {
         "ok": True,
         "bot_username": username,
@@ -158,13 +160,14 @@ def telegram_webhook(bot_username):
     if not entry:
         fallback_url = os.getenv("FORWARD_FALLBACK_URL")
         if not fallback_url:
-            app.logger.warning(f"[Webhook] Nenhum registro encontrado para {bot_username}")
+            app.logger.warning(f"[Webhook] bot={bot_username} não encontrado no registry e sem fallback")
             return ("ignored", 404)
         entry = {
             "forward_url": fallback_url,
             "secret": os.getenv("FALLBACK_SECRET", ""),
         }
 
+    # valida o secret do Telegram, se ele mandou
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if header_secret and header_secret != entry.get("secret", ""):
         app.logger.warning(f"[Webhook] Secret mismatch para {bot_username}")
@@ -172,14 +175,12 @@ def telegram_webhook(bot_username):
 
     callback = entry.get("forward_url")
     if not callback:
-        app.logger.error(f"[Webhook] Nenhum callback definido para {bot_username}")
+        app.logger.error(f"[Webhook] bot={bot_username} sem forward_url")
         return ("no callback", 500)
 
     payload = request.get_json(force=True, silent=True)
 
-    # 🔹 Logs visíveis no Render
-    app.logger.info(f"[Webhook] Mensagem recebida de Telegram → {bot_username}")
-    app.logger.info(f"[Forward] Enviando para {callback}")
+    app.logger.info(f"[Webhook] recebido de TG para {bot_username}, encaminhando para {callback}")
 
     try:
         headers = {
@@ -188,9 +189,11 @@ def telegram_webhook(bot_username):
             "X-Forwarded-For": request.remote_addr or "",
         }
         r = requests.post(callback, json=payload, headers=headers, timeout=15)
-        app.logger.info(f"[Forward] OK → {callback} | status={r.status_code}")
+        app.logger.info(
+            f"[Webhook] forward -> {callback} status={r.status_code} body={r.text[:200]!r}"
+        )
     except Exception as e:
-        app.logger.error(f"[Forward] Falhou → {callback} | erro={str(e)}")
+        app.logger.exception(f"[Webhook] forward failed para {callback}")
         return (
             jsonify({"ok": False, "error": "forward_failed", "detail": str(e)}),
             502,
@@ -218,8 +221,6 @@ def test_forward():
         "time": int(time.time()),
     }
 
-    app.logger.info(f"[TestForward] Testando envio para {forward}")
-
     try:
         r = requests.post(
             forward,
@@ -227,7 +228,7 @@ def test_forward():
             headers={"Content-Type": "application/json", "X-RoboDoDark-Test": "1"},
             timeout=15,
         )
-        app.logger.info(f"[TestForward] Resposta {r.status_code} de {forward}")
+        app.logger.info(f"[TestForward] -> {forward} status={r.status_code} body={r.text[:200]!r}")
         return jsonify(
             {
                 "ok": True,
@@ -237,7 +238,7 @@ def test_forward():
             }
         ), 200
     except Exception as e:
-        app.logger.error(f"[TestForward] Falhou para {forward} → {e}")
+        app.logger.exception(f"[TestForward] failed -> {forward}")
         return jsonify(
             {
                 "ok": False,
