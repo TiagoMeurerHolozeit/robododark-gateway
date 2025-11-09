@@ -154,32 +154,42 @@ def telegram_webhook(bot_username):
     registry = load_registry()
     entry = registry.get(bot_username)
 
+    # fallback: se não achou no arquivo, tenta usar variável de ambiente fixa
     if not entry:
-        app.logger.warning("webhook recebido para %s mas não está no registry", bot_username)
-        return ("OK", 200)
+        fallback_url = os.getenv("FORWARD_FALLBACK_URL")
+        if not fallback_url:
+            return ("ignored", 404)
+        # monta um entry fake só pra este request
+        entry = {
+            "forward_url": fallback_url,
+            "secret": os.getenv("FALLBACK_SECRET", ""),  # opcional
+        }
 
-    # valida secret, mas não quebra
+    # valida o secret do Telegram, se ele mandou
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    if header_secret and header_secret != entry.get("secret"):
-        app.logger.warning("secret mismatch para %s", bot_username)
+    if header_secret and header_secret != entry.get("secret", ""):
+        app.logger.warning("secret mismatch for %s", bot_username)
+        return ("unauthorized", 401)
 
     callback = entry.get("forward_url")
     if not callback:
-        app.logger.error("registro de %s não tem forward_url", bot_username)
-        return ("OK", 200)
+        return ("no callback", 500)
 
     payload = request.get_json(force=True, silent=True)
 
     try:
         headers = {
             "Content-Type": "application/json",
-            "X-RoboDoDark-Secret": entry.get("secret"),
+            "X-RoboDoDark-Secret": entry.get("secret", ""),
             "X-Forwarded-For": request.remote_addr or "",
         }
-        r = requests.post(callback, json=payload, headers=headers, timeout=15)
-        app.logger.info("forward para %s → status %s", callback, getattr(r, "status_code", "?"))
+        requests.post(callback, json=payload, headers=headers, timeout=15)
     except Exception as e:
-        app.logger.exception("forward para %s falhou", callback)
+        app.logger.exception("forward failed")
+        return (
+            jsonify({"ok": False, "error": "forward_failed", "detail": str(e)}),
+            502,
+        )
 
     return ("OK", 200)
 
