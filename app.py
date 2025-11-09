@@ -170,17 +170,23 @@ def register():
 def telegram_webhook(bot_username):
     registry = load_registry()
     entry = registry.get(bot_username)
-    if not entry:
-        return ("ignored", 404)
 
+    # 1) se o bot não estiver no registry, loga e devolve 200
+    if not entry:
+        app.logger.warning("webhook recebido para %s mas não está no registry", bot_username)
+        return ("OK", 200)
+
+    # 2) valida o secret do Telegram (mas mesmo que falhe, vamos só logar)
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if header_secret and header_secret != entry.get("secret"):
-        app.logger.warning("secret mismatch for %s", bot_username)
-        return ("unauthorized", 401)
+        app.logger.warning("secret mismatch para %s", bot_username)
+        # não devolve 401 pro Telegram, só avisa
+        # return ("unauthorized", 401)
 
     callback = entry.get("forward_url")
     if not callback:
-        return ("no callback", 500)
+        app.logger.error("registro de %s não tem forward_url", bot_username)
+        return ("OK", 200)
 
     payload = request.get_json(force=True, silent=True)
 
@@ -190,14 +196,13 @@ def telegram_webhook(bot_username):
             "X-RoboDoDark-Secret": entry.get("secret"),
             "X-Forwarded-For": request.remote_addr or "",
         }
-        requests.post(callback, json=payload, headers=headers, timeout=15)
+        r = requests.post(callback, json=payload, headers=headers, timeout=15)
+        app.logger.info("forward para %s → status %s", callback, getattr(r, "status_code", "?"))
     except Exception as e:
-        app.logger.exception("forward failed")
-        return (
-            jsonify({"ok": False, "error": "forward_failed", "detail": str(e)}),
-            502,
-        )
+        # AQUI é o que queremos ver no Render
+        app.logger.exception("forward para %s falhou", callback)
 
+    # SEMPRE 200 pro Telegram
     return ("OK", 200)
 
 
