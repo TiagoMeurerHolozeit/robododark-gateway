@@ -1,4 +1,3 @@
-# app.py
 import os
 import json
 import time
@@ -61,31 +60,18 @@ def root():
 
 @app.post("/v1/register")
 def register():
-    """
-    Body JSON:
-      {
-        "bot_token": "...",
-        "forward_url": "https://seu-tunel/webhook/robododark_telegram"
-      }
-    """
     data = request.get_json(force=True, silent=True) or {}
     bot_token = data.get("bot_token", "").strip()
     forward_url = data.get("forward_url", "").strip()
 
     if not bot_token or not forward_url:
-        return (
-            jsonify({"ok": False, "error": "missing bot_token or forward_url"}),
-            400,
-        )
+        return jsonify({"ok": False, "error": "missing bot_token or forward_url"}), 400
 
-    # 1. valida o token no Telegram
+    # 1) valida token
     try:
         r = telegram_api_get(bot_token, "getMe", timeout=10)
     except Exception as e:
-        return (
-            jsonify({"ok": False, "error": "telegram_getMe_failed", "detail": str(e)}),
-            502,
-        )
+        return jsonify({"ok": False, "error": "telegram_getMe_failed", "detail": str(e)}), 502
 
     if not r.ok:
         return (
@@ -113,7 +99,7 @@ def register():
             400,
         )
 
-    # 2. salva no registry primeiro (ESSENCIAL)
+    # 2) guarda no registry primeiro
     secret = make_secret(username)
     registry = load_registry()
     registry[username] = {
@@ -124,7 +110,7 @@ def register():
     }
     save_registry(registry)
 
-    # 3. monta a URL do webhook que o Telegram vai chamar (sempre o gateway)
+    # 3) monta url pública do gateway
     if GATEWAY_BASE:
         gateway_base = GATEWAY_BASE.rstrip("/")
     else:
@@ -132,14 +118,12 @@ def register():
 
     webhook_url = f"{gateway_base}/telegram/{username}"
 
-    # 4. tenta registrar no Telegram,
-    #    mas se der erro, não vamos mais devolver 400 pra quem chamou.
+    # 4) tenta setar no Telegram, mas não falha o registro
     params = {
         "url": webhook_url,
         "allowed_updates": ALLOWED_UPDATES,
         "secret_token": secret,
     }
-
     telegram_ok = True
     telegram_error_text = None
     try:
@@ -151,7 +135,6 @@ def register():
         telegram_ok = False
         telegram_error_text = str(e)
 
-    # 5. devolve sempre 200, porque o registro local deu certo
     resp = {
         "ok": True,
         "bot_username": username,
@@ -171,17 +154,14 @@ def telegram_webhook(bot_username):
     registry = load_registry()
     entry = registry.get(bot_username)
 
-    # 1) se o bot não estiver no registry, loga e devolve 200
     if not entry:
         app.logger.warning("webhook recebido para %s mas não está no registry", bot_username)
         return ("OK", 200)
 
-    # 2) valida o secret do Telegram (mas mesmo que falhe, vamos só logar)
+    # valida secret, mas não quebra
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if header_secret and header_secret != entry.get("secret"):
         app.logger.warning("secret mismatch para %s", bot_username)
-        # não devolve 401 pro Telegram, só avisa
-        # return ("unauthorized", 401)
 
     callback = entry.get("forward_url")
     if not callback:
@@ -199,11 +179,60 @@ def telegram_webhook(bot_username):
         r = requests.post(callback, json=payload, headers=headers, timeout=15)
         app.logger.info("forward para %s → status %s", callback, getattr(r, "status_code", "?"))
     except Exception as e:
-        # AQUI é o que queremos ver no Render
         app.logger.exception("forward para %s falhou", callback)
 
-    # SEMPRE 200 pro Telegram
     return ("OK", 200)
+
+
+# ---------- NOVO: endpoint pra testar o forward de dentro do Render ----------
+@app.post("/v1/test-forward")
+def test_forward():
+    """
+    POST /v1/test-forward?bot=OmniSuperBot
+    Tenta reenviar um JSON de teste para o forward_url salvo no registry.
+    Útil pra ver se o Render consegue falar com o teu domínio.
+    """
+    bot = request.args.get("bot", "").strip()
+    registry = load_registry()
+    entry = registry.get(bot)
+    if not entry:
+        return jsonify({"ok": False, "error": "bot_not_found_in_registry"}), 404
+
+    forward = entry.get("forward_url")
+    if not forward:
+        return jsonify({"ok": False, "error": "no_forward_url"}), 400
+
+    test_payload = {
+        "test": True,
+        "source": "render-gateway",
+        "bot": bot,
+        "time": int(time.time()),
+    }
+
+    try:
+        r = requests.post(
+            forward,
+            json=test_payload,
+            headers={"Content-Type": "application/json", "X-RoboDoDark-Test": "1"},
+            timeout=15,
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "forward_url": forward,
+                "status_code": r.status_code,
+                "text": r.text[:500],
+            }
+        ), 200
+    except Exception as e:
+        return jsonify(
+            {
+                "ok": False,
+                "forward_url": forward,
+                "error": "request_failed",
+                "detail": str(e),
+            }
+        ), 200
 
 
 @app.get("/v1/list")
